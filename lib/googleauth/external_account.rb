@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+require 'time'
 require "googleauth/oauth2/sts_client"
 
 module Google
@@ -113,13 +114,19 @@ module Google
           grant_type: STS_GRANT_TYPE,
           subject_token: uri_escape(aws_signed_request.to_json),
           subject_token_type: @subject_token_type,
-          scopes: @scope,
+          scopes: @service_account_impersonation_url ? IAM_SCOPE : @scope,
           requested_token_type: STS_REQUESTED_TOKEN_TYPE
         )
-        # Extract the expiration time in seconds from the response and calculate the actual expiration time
-        # and then save that to the expiry variable.
-        @expiry = Time.now.utc + response["expires_in"].to_i
-        @access_token = response["access_token"]
+        if(@service_account_impersonation_url)
+          impersonated_response = get_impersonated_access_token(response["access_token"])
+          @expiry = Time.parse(impersonated_response["expireTime"])
+          @access_token = impersonated_response["accessToken"]
+        else
+          # Extract the expiration time in seconds from the response and calculate the actual expiration time
+          # and then save that to the expiry variable.
+          @expiry = Time.now.utc + response["expires_in"].to_i
+          @access_token = response["access_token"]
+        end
       end
 
       # Whether the id_token or access_token is missing or about to expire.
@@ -127,7 +134,7 @@ module Google
         @access_token.nil? || expires_within?(60)
       end
 
-      def expires_within?(seconds)
+      def expires_within? seconds
         @expiry && @expiry - Time.now.utc < seconds
       end
 
@@ -147,6 +154,24 @@ module Google
       end
 
       private
+
+      def get_impersonated_access_token token, options = {}
+        c = options[:connection] || Faraday.default_connection
+
+        response = c.post(@service_account_impersonation_url) do |req|
+          req.headers["Authorization"] = "Bearer #{token}"
+          req.headers["Content-Type"] = "application/json"
+          req.body = MultiJson.dump({
+            "scope": @scope
+          })
+        end
+
+        if response.status != 200
+          raise "Service account impersonation failed with status #{response.status}"
+        end
+
+        MultiJson.load response.body
+      end
 
       def uri_escape(string)
         if string.nil?
